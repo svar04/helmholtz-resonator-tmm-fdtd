@@ -11,8 +11,8 @@ from matplotlib.colors import Normalize
 
 # USER PARAMETERS — change these to re-run with different parameters
 
-ar_start  = 1.0     # lowest aspect ratio to sweep
-ar_stop   = 5.0     # highest aspect ratio to sweep
+ar_start  = 1    # lowest aspect ratio to sweep
+ar_stop   = 7.0     # highest aspect ratio to sweep
 ar_step   = 0.05    # step between aspect ratios
 
 num_offsets   = 201   # how many neck positions per AR (0 = centred, max = at wall)
@@ -149,6 +149,8 @@ for i, ar in enumerate(ar_list):
         # First peak — main Helmholtz resonance
         p1_freq = peak_freqs[0] if len(peak_freqs) >= 1 else 0.0
         p1_db   = peak_dbs[0]   if len(peak_freqs) >= 1 else 0.0
+        p2_freq = peak_freqs[1] if len(peak_freqs) >= 2 else 0.0
+        p2_db   = peak_dbs[1]   if len(peak_freqs) >= 2 else 0.0
 
         # Store the zero-offset first peak as the baseline for this AR
         if j == 0:
@@ -158,7 +160,10 @@ for i, ar in enumerate(ar_list):
         # Only look between 1.5× and 4× the zero-offset first peak frequency.
         # This window excludes high-order cavity harmonics while still catching
         # the genuine second resonance as it shifts with geometry.
+
+        '''
         p2_freq, p2_db = 0.0, 0.0
+        
         if baseline_p1_freq[i] > 0 and len(peak_freqs) >= 2:
             window_lo = baseline_p1_freq[i] * 1.5
             window_hi = baseline_p1_freq[i] * 4.0
@@ -167,6 +172,8 @@ for i, ar in enumerate(ar_list):
                 idx       = np.argmax(in_window)   # lowest-frequency peak in window
                 p2_freq   = peak_freqs[idx]
                 p2_db     = peak_dbs[idx]
+        '''
+
 
         results[i, j] = [ar, offset_fracs[j], p1_freq, p1_db, p2_freq, p2_db]
 
