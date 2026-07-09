@@ -24,69 +24,64 @@ c   = 343.0    # [m/s]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ar_start  = 1.0
-ar_stop   = 6.0
+ar_stop   = 5.0
 ar_step   = 0.05
 
 num_offsets  = 201    # 0.5% offset resolution
 freq_limit   = 10001  # [Hz] — sweep 1 to 10000 Hz
 
-min_peak_db  = 15     # [dB] — Etaix threshold: below this is acoustically marginal
+min_peak_db  = 15     # [dB] — Etaix threshold
 min_peak_gap = 200    # [Hz] — minimum separation between detected peaks
 
-max_modes = 16         # max peaks stored per configuration
+max_modes = 16        # max peaks stored per configuration
 
 # Fixed values for 1D sweep plots (one IV swept, other held constant).
-# AR=4.0: well-resolved cavity, shows 3-4 modes, not at either extreme.
-# offset=0.5: clearly asymmetric, offset-induced modes present, not degenerate.
 FIXED_AR     = 4.0
 FIXED_OFFSET = 0.5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NECK GEOMETRY
-#
-# Cylindrical neck — 3D.  Must match FDTD equivalence.
-# FDTD uses neck_width_2D = neck_area / duct_height to preserve acoustic mass.
-# The TMM neck_impedance = rho*c / neck_area is the reference.
-# The FDTD neck_impedance = rho*c / (neck_width_2D * duct_height)
-#                         = rho*c / neck_area  ← identical, by construction.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-neck_width   = 0.050   # [m]
-neck_length   = 0.050  # [m]
-
-neck_radius = neck_width / 2.0
-neck_eff     = neck_length + 1.7 * (neck_width / 2.0)  # [m] — effective length with end corrections
-neck_area    = neck_width ** 2   # [m²]
-neck_impedance = rho * c / neck_area  # [Pa·s/m³]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # DUCT GEOMETRY
 #
-# duct_height = 0.0113m — chosen so neck_width_2D = neck_area/duct_height
-# lands on exactly 2 cells at dx=5mm.  Must match FDTD.
-#
-# duct_area = duct_height^2  — square cross-section, same assumption as
-# z_cav = rho*c/cav_width^2 in the cavity impedance formula.
+# Square cross-section: duct_area = duct_height^2.
 # duct_impedance drives the TL formula (Eq. 6 Etaix).
+# Defined first because neck_area depends on duct_height.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+duct_height    = 0.050   # [m]
+duct_area      = duct_height ** 2
+duct_impedance = rho * c / duct_area
 
-duct_height    = 0.300  # [m]
-duct_area      = duct_height ** 2   # [m²] — square cross-section
-duct_impedance = rho * c / duct_area   # [Pa·s/m³]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NECK GEOMETRY
+#
+# SLOT neck — spans the full duct width in the z-direction.
+# neck_area = neck_width * duct_height   (NOT neck_width^2)
+# This matches the FDTD exactly: neck_width_2D = neck_area / duct_height
+#                                              = neck_width  (self-consistent)
+# neck_impedance = rho*c / neck_area — identical in both models by construction.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+neck_width  = 0.010   # [m] — slot opening width (x-direction)
+neck_length = 0.020   # [m]
+
+neck_radius    = neck_width / 2.0
+neck_eff       = neck_length + 1.7 * neck_radius        # effective length with end correction
+neck_area      = neck_width * duct_height               # [m²] — SLOT neck (NOT neck_width^2)
+neck_impedance = rho * c / neck_area                    # [Pa·s/m³]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CAVITY GEOMETRY
 #
 # Volume held constant.  AR = cav_length / cav_width.
-# cav_width = cbrt(volume / AR) from volume = cav_width^3 * AR.
-# z_cav = rho*c / cav_width^2 — impedance of square cavity cross-section.
+# cav_width = cbrt(volume / AR)  from  volume = cav_width^3 * AR.
+# z_cav = rho*c / cav_width^2 — characteristic impedance of cavity cross-section.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-cavity_volume = 0.008
+cavity_volume = 30e-6   # [m³] — 30 ml
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FREQUENCY ARRAY AND WAVENUMBERS
@@ -103,20 +98,21 @@ k_vals = 2.0 * np.pi * freqs / c
 num_ars = int(round((ar_stop - ar_start) / ar_step)) + 1
 ar_list = np.linspace(ar_start, ar_stop, num_ars)
 
-# Validate AR range against FDTD resolution limits
-dx = 0.005  # must match FDTD dx for the validation prints below
+# Validation prints — dx must match FDTD
+dx = 0.002
 for ar_check in [ar_start, ar_stop]:
     cw = np.cbrt(cavity_volume / ar_check)
     cl = cw * ar_check
     print(f"AR={ar_check:.1f}: cav {cl*1000:.1f}mm x {cw*1000:.1f}mm  "
-          f"→ {int(round(cl/dx))} x {int(round(cw/dx))} cells at dx={dx*1000:.0f}mm")
+          f"-> {int(round(cl/dx))} x {int(round(cw/dx))} cells at dx={dx*1000:.0f}mm")
 
 print(f"\nAspect ratios : {num_ars}  ({ar_start} to {ar_stop}, step {ar_step})")
 print(f"Offsets per AR: {num_offsets}")
 print(f"Total configs : {num_ars * num_offsets:,}")
 print(f"Neck eff len:   {neck_eff*1000:.3f}mm")
-print(f"Neck impedance: {neck_impedance:.2f} Pa·s/m³")
-print(f"Duct impedance: {duct_impedance:.2f} Pa·s/m³")
+print(f"Neck area:      {neck_area:.2e} m2  (slot: {neck_width*1000:.0f}mm x {duct_height*1000:.0f}mm)")
+print(f"Neck impedance: {neck_impedance:.2f} Pa.s/m3")
+print(f"Duct impedance: {duct_impedance:.2f} Pa.s/m3")
 print(f"Neck/duct Z ratio: {neck_impedance/duct_impedance:.1f}")
 
 # 3D result arrays — zeros mean mode not detected
@@ -146,10 +142,8 @@ def cavity_impedance(k, l1, l2, z_neck, z_cav):
     B = z_cav  * np.cos(k * neck_eff)  * np.cos(k * l1) * np.cos(k * l2)
     C = z_neck * np.sin(k * (l1 + l2)) * np.cos(k * neck_eff)
     D = z_cav  * np.sin(k * neck_eff)  * np.cos(k * l1) * np.cos(k * l2)
-
     denom = C + D
-    denom = np.where(np.abs(denom) < 1e-30, 1e-30, denom)   # avoid divide-by-zero at anti-resonance
-
+    denom = np.where(np.abs(denom) < 1e-30, 1e-30, denom)
     return 1j * z_neck * (A - B) / denom
 
 
@@ -157,21 +151,17 @@ def compute_TL(Z):
     """
     Transmission loss [dB] — Equation 6, Etaix 2016.
     TL = 20 log10 |1 + Z_duct / (2Z)|
-    Higher TL = more attenuation at that frequency.
     """
     return 20.0 * np.log10(np.abs(1.0 + duct_impedance / (2.0 * Z)))
 
 
 def get_TL_for(ar, offset):
-    """
-    Recompute full TL spectrum for one (ar, offset) pair.
-    Used for raw TL overlay plots without re-indexing the stored arrays.
-    """
+    """Recompute full TL spectrum for one (ar, offset) pair."""
     cav_width  = np.cbrt(cavity_volume / ar)
     cav_length = cav_width * ar
     z_cav      = rho * c / cav_width ** 2
-    l1 = (cav_length / 2.0) - offset   # shorter section
-    l2 = (cav_length / 2.0) + offset   # longer section
+    l1 = (cav_length / 2.0) - offset
+    l2 = (cav_length / 2.0) + offset
     Z  = cavity_impedance(k_vals, l1, l2, neck_impedance, z_cav)
     return compute_TL(Z)
 
@@ -186,12 +176,9 @@ for i, ar in enumerate(ar_list):
     cav_length = cav_width * ar
     z_cav      = rho * c / cav_width ** 2
 
-    # Max offset: neck centre must stay >= neck_radius from either end wall
-    # so the neck never overhangs the cavity boundary.
     max_offset   = (cav_length / 2.0) - neck_radius
     offsets      = np.linspace(0.0, max_offset, num_offsets)
-    offset_fracs = offsets / max_offset   # normalised 0→1
-
+    offset_fracs = offsets / max_offset
     offset_fracs_all[i, :] = offset_fracs
 
     for j, offset in enumerate(offsets):
@@ -241,7 +228,7 @@ extent_2d    = [ar_start, ar_stop, 0.0, 1.0]
 def make_sq1_presence_page(m):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(
-        f"SQ1 — Mode {m+1} Presence\n"
+        f"TMM  SQ1 — Mode {m+1} Presence\n"
         f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}",
         fontsize=11, fontweight='bold'
     )
@@ -273,7 +260,6 @@ def make_sq1_presence_page(m):
     axes[2].set_xlabel("Aspect Ratio  L/W")
     axes[2].set_ylabel("Offset Fraction")
     axes[2].set_title("C — 2D presence map")
-
     plt.tight_layout()
     return fig
 
@@ -281,7 +267,7 @@ def make_sq1_presence_page(m):
 def make_sq2_frequency_page(m):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(
-        f"SQ2 — Mode {m+1} Frequency\n"
+        f"TMM  SQ2 — Mode {m+1} Frequency\n"
         f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}",
         fontsize=11, fontweight='bold'
     )
@@ -315,7 +301,6 @@ def make_sq2_frequency_page(m):
     axes[2].set_xlabel("Aspect Ratio  L/W")
     axes[2].set_ylabel("Offset Fraction")
     axes[2].set_title("C — 2D frequency map  (white=not detected)")
-
     plt.tight_layout()
     return fig
 
@@ -323,7 +308,7 @@ def make_sq2_frequency_page(m):
 def make_sq3_depth_page(m):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(
-        f"SQ3 — Mode {m+1} TL Depth\n"
+        f"TMM  SQ3 — Mode {m+1} TL Depth\n"
         f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}",
         fontsize=11, fontweight='bold'
     )
@@ -357,12 +342,15 @@ def make_sq3_depth_page(m):
     axes[2].set_xlabel("Aspect Ratio  L/W")
     axes[2].set_ylabel("Offset Fraction")
     axes[2].set_title("C — 2D TL depth map  (white=not detected)")
-
     plt.tight_layout()
     return fig
 
 
 def make_ar_plots(which_ars=None):
+    """
+    Raw TL spectra overlaid across all offsets for selected ARs.
+    3 ARs per page, colour = offset fraction.
+    """
     if which_ars is None:
         which_ars = list(range(num_ars))
 
@@ -392,7 +380,7 @@ def make_ar_plots(which_ars=None):
         cbar.set_label("Neck offset\n(0=centre, 1=wall)", fontsize=8)
 
         ax.set_title(
-            f"AR={ar:.2f}  |  L={cav_length*1000:.1f}mm  |  "
+            f"TMM  AR={ar:.2f}  |  L={cav_length*1000:.1f}mm  |  "
             f"W={cav_width*1000:.1f}mm  |  max offset={max_offset*1000:.1f}mm",
             fontweight='bold', loc='left', fontsize=9
         )
@@ -438,18 +426,18 @@ with PdfPages(pdf_path) as pdf:
         plt.close(fig)
         print(f"    Mode {m+1}")
 
-    print("  Raw TL overlays")
+    print("  Raw TL overlays — all ARs")
     for batch_start in range(0, num_ars, per_page):
         batch = list(range(batch_start, min(batch_start + per_page, num_ars)))
         fig   = make_ar_plots(which_ars=batch)
         pdf.savefig(fig, bbox_inches='tight', dpi=150)
         plt.close(fig)
-        print(f"    AR {ar_list[batch[0]]:.2f}–{ar_list[batch[-1]]:.2f}")
+        print(f"    AR {ar_list[batch[0]]:.2f}-{ar_list[batch[-1]]:.2f}")
 
     info = pdf.infodict()
     info['Title']   = 'Helmholtz Resonator TMM Parametric Sweep'
     info['Author']  = 'Svar Joshi'
-    info['Subject'] = 'Asymmetric cavity — neck offset x aspect ratio'
+    info['Subject'] = 'Asymmetric rectangular cavity — neck offset x aspect ratio'
 
 print(f"\nSaved: {pdf_path}")
 
@@ -463,15 +451,15 @@ elif platform.system() == 'Windows':
 # INTERACTIVE MODE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("\n" + "─" * 50)
+print("\n" + "-" * 50)
 print("INTERACTIVE MODE")
-print("─" * 50)
+print("-" * 50)
 print("  sq1 [mode]   — mode presence plots   e.g. sq1 2")
 print("  sq2 [mode]   — mode frequency plots")
 print("  sq3 [mode]   — mode TL depth plots")
 print("  [number]     — raw TL overlay for AR  e.g. 3.5")
 print("  exit         — quit")
-print("─" * 50)
+print("-" * 50)
 
 while True:
     cmd = input("\n> ").strip().lower()
@@ -488,7 +476,7 @@ while True:
             fig = make_sq1_presence_page(m)
             plt.show()
         except (IndexError, ValueError):
-            print(f"  Usage: sq1 [1–{n_modes_present}]")
+            print(f"  Usage: sq1 [1-{n_modes_present}]")
 
     elif cmd.startswith('sq2'):
         try:
@@ -499,7 +487,7 @@ while True:
             fig = make_sq2_frequency_page(m)
             plt.show()
         except (IndexError, ValueError):
-            print(f"  Usage: sq2 [1–{n_modes_present}]")
+            print(f"  Usage: sq2 [1-{n_modes_present}]")
 
     elif cmd.startswith('sq3'):
         try:
@@ -510,7 +498,7 @@ while True:
             fig = make_sq3_depth_page(m)
             plt.show()
         except (IndexError, ValueError):
-            print(f"  Usage: sq3 [1–{n_modes_present}]")
+            print(f"  Usage: sq3 [1-{n_modes_present}]")
 
     else:
         try:

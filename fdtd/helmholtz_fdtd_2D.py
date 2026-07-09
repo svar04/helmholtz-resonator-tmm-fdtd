@@ -1,119 +1,122 @@
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
+import os
+import platform
+import subprocess
+import time
+from scipy.signal import find_peaks
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
 matplotlib.use('TkAgg')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHYSICAL CONSTANTS
+# PHYSICAL CONSTANTS  —  must match TMM exactly
 # ═══════════════════════════════════════════════════════════════════════════════
 
-c   = 343.0
-rho = 1.21
+c   = 343.0    # [m/s]
+rho = 1.21     # [kg/m³]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SIMULATION PARAMETERS
+# SWEEP RESOLUTION
+#
+# SWEEP_MODE = 'coarse'  →   9 ARs ×  21 offsets =  189 FDTD runs  (~16 min)
+# SWEEP_MODE = 'medium'  →  17 ARs ×  41 offsets =  697 FDTD runs  (~60 min)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-f_max       = 10000.0
-dx          = 0.001
-dt          = 0.4 * dx / (c * np.sqrt(2))
-pml_cells   = 10
+SWEEP_MODE = 'coarse'   # <- change to 'medium' for final publication run
+
+if SWEEP_MODE == 'coarse':
+    num_ars     = 9
+    num_offsets = 21
+elif SWEEP_MODE == 'medium':
+    num_ars     = 17
+    num_offsets = 41
+else:
+    raise ValueError(f"Unknown SWEEP_MODE '{SWEEP_MODE}' — use 'coarse' or 'medium'")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PEAK DETECTION  —  must match TMM exactly
+# ═══════════════════════════════════════════════════════════════════════════════
+
+min_peak_db  = 15      # [dB]
+min_peak_gap = 200     # [Hz]
+max_modes    = 16
+f_max        = 10000.0
+
+FIXED_AR     = 4.0
+FIXED_OFFSET = 0.5
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FDTD SIMULATION PARAMETERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+dx        = 0.002                          # [m] — 2 mm
+dt        = 0.4 * dx / (c * np.sqrt(2))   # CFL-stable timestep
+T_sim     = 0.10                           # [s] — 100 ms → 10 Hz freq resolution
+N_steps   = int(T_sim / dt)
+pml_cells = 10
 
 pulse_width = 1.5 / f_max
 pulse_delay = 6.0 * pulse_width
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DUCT GEOMETRY
+# GEOMETRY  —  must match TMM exactly
 #
-# duct_height must satisfy c/(2*duct_height) > f_max = 10000 Hz
-# → duct_height < c/(2*f_max) = 343/20000 = 0.01715 m
-# Using 0.012m gives cutoff = 343/(2*0.012) = 14292 Hz  ✓
-# Neck width = 2*neck_radius = 0.012m → neck_cells_x = 12 at dx=1mm
-# Neck area  = neck_width * duct_height = 0.012 * 0.012 = 1.44e-4 m²
-# neck_area_3D = (2*0.006)^2 = 1.44e-4 m²  ← exact match ✓
+# SLOT neck: neck_area_3D = neck_width_2D * duct_height
+# neck_width_2D = neck_area_3D / duct_height = neck_width_2D  (self-consistent)
+# TMM neck_area = neck_width * duct_height — identical by construction.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-duct_length = 0.800
-duct_height = 0.300
-duct_width  = 0.300
+duct_length   = 0.400   # [m]
+duct_height   = 0.050   # [m]
+duct_width    = 0.050   # [m]
+cavity_volume = 30e-6   # [m³]
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# NECK GEOMETRY
-# ═══════════════════════════════════════════════════════════════════════════════
-
-neck_width_2D = 0.050
-neck_length   = 0.050
-
-neck_radius = neck_width_2D / 2
+neck_width_2D = 0.010   # [m]  slot opening = TMM neck_width
+neck_length   = 0.020   # [m]
+neck_radius   = neck_width_2D / 2.0
 neck_eff      = neck_length + 1.7 * neck_radius
-neck_area_3D  = neck_width_2D ** 2
+neck_area_3D  = neck_width_2D * duct_height   # SLOT: matches TMM neck_area
 
-neck_cells_x = max(1, int(round(neck_width_2D / dx)))
-neck_cells_y = max(1, int(round(neck_length   / dx)))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CAVITY GEOMETRY
-# ═══════════════════════════════════════════════════════════════════════════════
-
-cavity_volume = 0.008
-
-ar_start = 1
-ar_stop = 6
-ar_step = 0.05
-
-AR          = 4
-offset_frac = 0.5
-
-cav_width  = np.cbrt(cavity_volume / AR)
-cav_length = cav_width * AR
-
-max_offset  = (cav_length / 2.0) - neck_radius
-neck_offset = offset_frac * max_offset
-
-resonator_centre_x = duct_length / 2.0
-
-cav_cells_x = max(1, int(round(cav_length / dx)))
-cav_cells_y = max(1, int(round(cav_width  / dx)))
+ar_start = 1.0
+ar_stop  = 5.0
+ar_list  = np.linspace(ar_start, ar_stop, num_ars)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GRID LAYOUT
+# FIXED GRID LAYOUT
 #
-# j=0                         bottom grid wall  (solid)
-# j=1 .. cav_cells_y_max      cavity band       (solid in plain, air in resonator
-#                                                 for the top cav_cells_y rows)
-# j=cav_cells_y_max+1 ..
-#   cav_cells_y_max+neck_cells_y  neck band     (solid in plain, air in resonator
-#                                                 at neck x-positions only)
-# j=duct_j_start ..
-#   duct_j_end-1              duct interior     (always air)
-# j=duct_j_end                duct top wall     (solid)
-# j=N_y_full-1                top grid wall     (solid)
+# Grid height fixed at widest cavity (AR = ar_start) — shape never changes.
+#
+# j = 0                              bottom grid wall
+# j = 1 .. cav_cells_y_max           cavity band
+# j = cav_cells_y_max+1 ..
+#     cav_cells_y_max+neck_cells_y   neck band
+# j = duct_j_start .. duct_j_end-1   duct interior  (always air)
+# j = duct_j_end                     duct top wall
+# j = N_y_full-1                     top grid wall
 # ═══════════════════════════════════════════════════════════════════════════════
 
-duct_cells_y    = int(round(duct_height / dx))
-cav_width_at_ar_min  = np.cbrt(cavity_volume / ar_start)   # ar_start = 1.5
-cav_cells_y_max = max(1, int(round(cav_width_at_ar_min / dx)))
+neck_cells_x          = max(1, int(round(neck_width_2D / dx)))
+neck_cells_y          = max(1, int(round(neck_length   / dx)))
+duct_cells_y          = int(round(duct_height / dx))
+cav_width_at_ar_start = np.cbrt(cavity_volume / ar_start)
+cav_cells_y_max       = max(1, int(round(cav_width_at_ar_start / dx)))
 
 N_y_full     = 1 + cav_cells_y_max + neck_cells_y + duct_cells_y + 2
-duct_j_start = 1 + cav_cells_y_max + neck_cells_y   # first duct air cell
-duct_j_end   = duct_j_start + duct_cells_y            # one past last duct air cell
+duct_j_start = 1 + cav_cells_y_max + neck_cells_y
+duct_j_end   = duct_j_start + duct_cells_y
 duct_j_mid   = (duct_j_start + duct_j_end) // 2
+N_x          = int(duct_length / dx)
 
-N_x     = int(duct_length / dx)
-T_sim   = 0.06
-N_steps = int(T_sim / dt)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SOURCE AND RECEIVER
-# ═══════════════════════════════════════════════════════════════════════════════
-
+resonator_centre_x = duct_length / 2.0
 src_i = pml_cells + 5
 rec_i = N_x - 1 - pml_cells - 5
 src_j = duct_j_mid
@@ -121,86 +124,70 @@ rec_j = duct_j_mid
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NECK AND CAVITY POSITIONS IN i
+# RESULT ARRAYS  —  identical structure to TMM all_freqs / all_dbs
 # ═══════════════════════════════════════════════════════════════════════════════
 
-neck_centre_i     = int(round(resonator_centre_x / dx))
-neck_offset_cells = int(round(neck_offset / dx))
-neck_i_start      = neck_centre_i + neck_offset_cells - neck_cells_x // 2
-neck_i_end        = neck_i_start + neck_cells_x
-
-cav_i_start = neck_centre_i - cav_cells_x // 2
-cav_i_end   = cav_i_start + cav_cells_x
-
-# Clamp to grid bounds
-neck_i_start = max(cav_i_start, min(neck_i_start, cav_i_end - neck_cells_x))
-neck_i_end   = neck_i_start + neck_cells_x
-cav_i_start  = max(0, cav_i_start)
-cav_i_end    = min(N_x, cav_i_end)
+fdtd_freqs       = np.zeros((num_ars, num_offsets, max_modes))
+fdtd_dbs         = np.zeros((num_ars, num_offsets, max_modes))
+offset_fracs_all = np.zeros((num_ars, num_offsets))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DIAGNOSTIC PRINTS
+# STARTUP DIAGNOSTICS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("=" * 60)
-print("GEOMETRY SUMMARY")
-print("=" * 60)
-print(f"Grid:              {N_x} x {N_y_full} cells  ({N_x*dx*100:.0f}cm x {N_y_full*dx*100:.1f}cm)")
-print(f"Time steps:        {N_steps}  ({T_sim*1000:.0f}ms)")
+neck_imp_fdtd = rho * c / neck_area_3D
+duct_imp_fdtd = rho * c / duct_height ** 2
+
+print("=" * 62)
+print(f"FDTD PARAMETRIC SWEEP  —  mode: {SWEEP_MODE.upper()}")
+print("=" * 62)
+print(f"Grid:              {N_x} x {N_y_full} cells  ({N_x*dx*1000:.0f}mm x {N_y_full*dx*1000:.1f}mm)")
+print(f"N_steps:           {N_steps:,}  ({T_sim*1000:.0f}ms)")
 print(f"dt:                {dt*1e6:.3f} us")
-print(f"Cells/wavelength:  {(c/f_max)/dx:.1f} at {f_max:.0f}Hz")
-print()
-print(f"Duct:              {duct_length*100:.0f}cm x {duct_height*1000:.1f}mm")
-print(f"Duct cells:        {N_x} x {duct_cells_y}  (mid j={duct_j_mid})")
-cutoff = c / (2 * duct_height)
-status = "OK" if cutoff > f_max else "WARNING — ABOVE CUTOFF"
-print(f"Cutoff freq:       {cutoff:.0f} Hz  [{status}]")
-print()
-print(f"Neck area (3D):    {neck_area_3D*1e6:.4f} mm²")
-print(f"Neck area (2D):    {neck_width_2D*duct_height*1e6:.4f} mm²  (must equal 3D area)")
-print(f"Neck width (2D):   {neck_width_2D*1000:.1f}mm  →  {neck_cells_x} cells")
-print(f"Neck length:       {neck_length*1000:.1f}mm  →  {neck_cells_y} cells")
-print(f"Neck impedance:    TMM={rho*c/neck_area_3D:.0f}  FDTD={rho*c/(neck_width_2D*duct_height):.0f}  match={'YES' if abs(neck_area_3D - neck_width_2D*duct_height) < 1e-10 else 'NO'}")
-print()
-print(f"Cavity AR:         {AR:.1f}")
-print(f"Cavity:            {cav_length*1000:.1f}mm x {cav_width*1000:.1f}mm  ({cav_cells_y} x {cav_cells_x} cells)")
-print(f"Neck offset:       {neck_offset*1000:.2f}mm  ({offset_frac:.0%} of max {max_offset*1000:.2f}mm)")
-print()
+print(f"Freq resolution:   {1/T_sim:.1f} Hz/bin")
+print(f"Cells/wl @ 10kHz:  {(c/f_max)/dx:.0f}")
+print(f"Duct:              {duct_length*1000:.0f}mm x {duct_height*1000:.0f}mm")
+print(f"Neck slot width:   {neck_width_2D*1000:.0f}mm  ->  {neck_cells_x} cells")
+print(f"Neck length:       {neck_length*1000:.0f}mm  ->  {neck_cells_y} cells")
+print(f"Neck area (3D):    {neck_area_3D:.2e} m2  (slot: {neck_width_2D*1000:.0f}mm x {duct_height*1000:.0f}mm)")
+print(f"Neck impedance:    {neck_imp_fdtd:.2f} Pa.s/m3")
+print(f"Duct impedance:    {duct_imp_fdtd:.2f} Pa.s/m3")
+print(f"Neck/duct Z ratio: {neck_imp_fdtd/duct_imp_fdtd:.1f}")
+print(f"Cavity volume:     {cavity_volume*1e6:.0f} ml")
+print(f"AR range:          {ar_start} - {ar_stop}  ({num_ars} values)")
+print(f"Offsets per AR:    {num_offsets}")
+print(f"Total FDTD runs:   {num_ars * num_offsets}")
 print(f"j layout:")
-print(f"  j=0                 bottom grid wall")
-print(f"  j=1..{cav_cells_y_max:<3}           cavity band (max AR=6 → {cav_cells_y_max} rows)")
-print(f"  j={1+cav_cells_y_max}..{duct_j_start-1:<3}          neck band ({neck_cells_y} rows)")
-print(f"  j={duct_j_start}..{duct_j_end-1:<3}          duct interior ({duct_cells_y} cells)  mid={duct_j_mid}")
-print(f"  j={duct_j_end}                 duct top wall")
-print(f"  j={N_y_full-1}                 top grid wall")
-print()
+print(f"  j=0              bottom grid wall")
+print(f"  j=1..{cav_cells_y_max:<2}          cavity band ({cav_cells_y_max} rows)")
+print(f"  j={1+cav_cells_y_max}..{duct_j_start-1:<2}        neck band ({neck_cells_y} rows)")
+print(f"  j={duct_j_start}..{duct_j_end-1:<2}        duct interior ({duct_cells_y} cells, mid={duct_j_mid})")
+print(f"  j={duct_j_end}             duct top wall")
+print(f"  j={N_y_full-1}             top grid wall")
 print(f"Source:            i={src_i}  j={src_j}")
 print(f"Receiver:          i={rec_i}  j={rec_j}")
-print(f"Left PML:          i=0..{pml_cells-1}")
-print(f"Right PML:         i={N_x-pml_cells}..{N_x-1}")
-print(f"Cavity i:          {cav_i_start}..{cav_i_end-1}  ({cav_cells_x} cells)")
-print(f"Neck i:            {neck_i_start}..{neck_i_end-1}  ({neck_cells_x} cells)")
-print("=" * 60)
+print("=" * 62)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FUNCTIONS
+# SIMULATION FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_pml_sigma(Nx, Ny, pml_cells, dx, c):
-    sigma_max = -3 * c * np.log(1e-6) / (2 * pml_cells * dx)
+def build_pml(Nx, Ny, pml_cells, dx, c, dt):
+    sigma_max = -3.0 * c * np.log(1e-6) / (2.0 * pml_cells * dx)
     sigma_x   = np.zeros((Nx, Ny))
-    sigma_y   = np.zeros((Nx, Ny))
     for i in range(pml_cells):
         depth              = (pml_cells - i) / pml_cells
         sigma_val          = sigma_max * depth ** 2
         sigma_x[i, :]           = sigma_val
         sigma_x[Nx - 1 - i, :] = sigma_val
-    return sigma_x, sigma_y
+    decay_x = np.exp(-sigma_x * dt)
+    decay_y = np.ones((Nx, Ny))
+    return decay_x, decay_y
 
 
-def build_plain_duct_mask(Nx, Ny, duct_j_start, duct_j_end):
+def build_plain_mask(Nx, Ny, duct_j_start, duct_j_end):
     mask = np.ones((Nx, Ny), dtype=bool)
     mask[:, duct_j_start:duct_j_end] = False
     return mask
@@ -213,25 +200,13 @@ def build_resonator_mask(Nx, Ny,
                          neck_i_start, neck_i_end,
                          neck_cells_y):
     mask = np.ones((Nx, Ny), dtype=bool)
-
-    # Duct interior
     mask[:, duct_j_start:duct_j_end] = False
-
-    # Cavity — occupies the TOP cav_cells_y rows of the cavity band.
-    # The cavity band runs from j=1 to j=cav_cells_y_max (inclusive).
-    # Shorter cavities (lower AR) leave solid wall below them — correct physics.
-    cav_j_top    = 1 + cav_cells_y_max      # Python slice end (exclusive) = first neck row
-    cav_j_bottom = cav_j_top - cav_cells_y  # first cavity air row (inclusive)
-    cav_j_bottom = max(1, cav_j_bottom)     # j=0 stays as solid floor
+    cav_j_top    = 1 + cav_cells_y_max
+    cav_j_bottom = max(1, cav_j_top - cav_cells_y)
     mask[cav_i_start:cav_i_end, cav_j_bottom:cav_j_top] = False
-
-    # Neck — runs from cav_j_top up to and including duct_j_start.
-    # neck_j_top = duct_j_start + 1 so the slice mask[..., neck_j_bottom:neck_j_top]
-    # includes duct_j_start, punching through the duct bottom wall.
     neck_j_bottom = cav_j_top
     neck_j_top    = duct_j_start + 1
     mask[neck_i_start:neck_i_end, neck_j_bottom:neck_j_top] = False
-
     return mask
 
 
@@ -264,7 +239,7 @@ def run_simulation(Nx, Ny, N_steps, dt, dx, rho, c,
     return receiver
 
 
-def pressure_to_db(time_signal, dt):
+def signal_to_db(time_signal, dt):
     N      = len(time_signal)
     window = np.hanning(N)
     P      = np.fft.rfft(time_signal * window)
@@ -273,148 +248,458 @@ def pressure_to_db(time_signal, dt):
     return freqs, db
 
 
-def visualise_masks(wall_resonator, src_i, rec_i, pml_cells, N_x, N_y_full):
-    cell_scale = 0.025
-    fig_w = max(16, N_x * cell_scale + 1)
-    fig_h = max(2, N_y_full * cell_scale + 1)
-    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+def geometry_for_ar(ar):
+    cav_width   = np.cbrt(cavity_volume / ar)
+    cav_length  = cav_width * ar
+    cav_cells_x = max(1, int(round(cav_length / dx)))
+    cav_cells_y = max(1, int(round(cav_width  / dx)))
+    max_offset  = (cav_length / 2.0) - neck_radius
+    return cav_width, cav_length, cav_cells_x, cav_cells_y, max_offset
 
-    ax.imshow(wall_resonator.T, origin='lower', cmap='gray_r', aspect='equal',
-              extent=[-0.5, N_x - 0.5, -0.5, N_y_full - 0.5])
 
-    left_pml = mpatches.Rectangle(
-        (-0.5, -0.5), pml_cells, N_y_full,
-        linewidth=0, facecolor='#ff69b4', alpha=0.25, zorder=0
-    )
-    right_pml = mpatches.Rectangle(
-        (N_x - pml_cells - 0.5, -0.5), pml_cells, N_y_full,
-        linewidth=0, facecolor='#ff69b4', alpha=0.25, zorder=0
-    )
-    ax.add_patch(left_pml)
-    ax.add_patch(right_pml)
-
-    ax.axvline(src_i, color='lime', lw=1.2, label=f'source i={src_i}', zorder=2)
-    ax.axvline(rec_i, color='red',  lw=1.2, label=f'receiver i={rec_i}', zorder=2)
-
-    ax.set_xlim(-0.5, N_x - 0.5)
-    ax.set_ylim(-0.5, N_y_full - 0.5)
-    ax.set_title(f"Resonator  AR={AR:.1f}  offset={offset_frac:.0%}  (black=wall, white=air, pink=PML)")
-    ax.set_xlabel("i  (x →)")
-    ax.set_ylabel("j  (y ↑)")
-    ax.legend(fontsize=7, loc='upper right')
-    plt.tight_layout()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BUILD MASKS AND SHARED ARRAYS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-print(f"DEBUG cav_i_start={cav_i_start} cav_i_end={cav_i_end} width={cav_i_end-cav_i_start}")
-print(f"DEBUG cav_j_bottom={1+cav_cells_y_max-cav_cells_y} cav_j_top={1+cav_cells_y_max} height={cav_cells_y}")
-
-sigma_x, sigma_y = build_pml_sigma(N_x, N_y_full, pml_cells, dx, c)
-decay_x = np.exp(-sigma_x * dt)
-decay_y = np.exp(-sigma_y * dt)
-
-wall_plain = build_plain_duct_mask(N_x, N_y_full, duct_j_start, duct_j_end)
-
-wall_resonator = build_resonator_mask(
-    N_x, N_y_full,
-    duct_j_start, duct_j_end,
-    cav_i_start, cav_i_end,
-    cav_cells_y_max, cav_cells_y,
-    neck_i_start, neck_i_end,
-    neck_cells_y
-)
-
-# ── Sanity checks ─────────────────────────────────────────────────────────────
-print("\nWall checks (all must be False):")
-print(f"  Source in plain wall:      {wall_plain[src_i, src_j]}")
-print(f"  Receiver in plain wall:    {wall_plain[rec_i, rec_j]}")
-print(f"  Source in resonator wall:  {wall_resonator[src_i, src_j]}")
-print(f"  Receiver in resonator wall:{wall_resonator[rec_i, rec_j]}")
-
-extra_air = int(np.sum(~wall_resonator) - np.sum(~wall_plain))
-expected  = cav_cells_x * cav_cells_y + neck_cells_x * neck_cells_y
-print(f"  Extra air cells:           {extra_air}  (expected ~{expected})")
-print(f"  Cavity carved:             {extra_air >= cav_cells_x * cav_cells_y}")
-print(f"  Neck open:                 {np.any(~wall_resonator[neck_i_start:neck_i_end, :])}")
-
-# ── Show masks ────────────────────────────────────────────────────────────────
-visualise_masks(wall_resonator, src_i, rec_i, pml_cells, N_x, N_y_full)
-
+def neck_positions(neck_offset, cav_length, cav_cells_x):
+    neck_centre_i     = int(round(resonator_centre_x / dx))
+    neck_offset_cells = int(round(neck_offset / dx))
+    neck_i_start      = neck_centre_i + neck_offset_cells - neck_cells_x // 2
+    neck_i_end        = neck_i_start + neck_cells_x
+    cav_i_start       = neck_centre_i - cav_cells_x // 2
+    cav_i_end         = cav_i_start + cav_cells_x
+    neck_i_start = max(cav_i_start, min(neck_i_start, cav_i_end - neck_cells_x))
+    neck_i_end   = neck_i_start + neck_cells_x
+    cav_i_start  = max(0, cav_i_start)
+    cav_i_end    = min(N_x, cav_i_end)
+    return cav_i_start, cav_i_end, neck_i_start, neck_i_end
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RUN 1 — PLAIN DUCT
+# BUILD SHARED ARRAYS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("\nRun 1: plain duct...")
+decay_x, decay_y = build_pml(N_x, N_y_full, pml_cells, dx, c, dt)
+wall_plain       = build_plain_mask(N_x, N_y_full, duct_j_start, duct_j_end)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLAIN DUCT RUN  —  once only
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("\nRunning plain duct reference simulation (once)...")
+t0        = time.time()
 rec_plain = run_simulation(
     N_x, N_y_full, N_steps, dt, dx, rho, c,
     decay_x, decay_y,
     src_i, src_j, rec_i, rec_j,
     wall_plain, pulse_width, pulse_delay
 )
-print("Done.")
+fdtd_freqs_axis, db_plain = signal_to_db(rec_plain, dt)
+freq_res = fdtd_freqs_axis[1] - fdtd_freqs_axis[0]
+print(f"Done in {time.time()-t0:.1f}s  |  freq resolution: {freq_res:.2f} Hz/bin")
+
+freq_mask_10k = fdtd_freqs_axis <= f_max
+min_dist_bins = max(1, int(min_peak_gap / freq_res))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RUN 2 — WITH RESONATOR
+# MAIN PARAMETRIC SWEEP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("Run 2: with resonator...")
-rec_resonator = run_simulation(
-    N_x, N_y_full, N_steps, dt, dx, rho, c,
-    decay_x, decay_y,
-    src_i, src_j, rec_i, rec_j,
-    wall_resonator, pulse_width, pulse_delay
-)
-print("Done.")
+total_runs  = num_ars * num_offsets
+run_count   = 0
+sweep_start = time.time()
+
+print(f"\nStarting sweep: {num_ars} ARs x {num_offsets} offsets = {total_runs} runs\n")
+
+for i, ar in enumerate(ar_list):
+
+    _, cav_length, cav_cells_x, cav_cells_y, max_offset = geometry_for_ar(ar)
+    offsets      = np.linspace(0.0, max_offset, num_offsets)
+    offset_fracs = offsets / max_offset if max_offset > 0 else np.zeros(num_offsets)
+    offset_fracs_all[i, :] = offset_fracs
+
+    for j, offset in enumerate(offsets):
+
+        run_count += 1
+        elapsed    = time.time() - sweep_start
+        if run_count > 1:
+            eta     = elapsed / (run_count - 1) * (total_runs - run_count + 1)
+            eta_str = f"ETA {eta/60:.1f}min"
+        else:
+            eta_str = "ETA --"
+
+        print(f"  [{run_count:>3}/{total_runs}]  AR={ar:.2f}  "
+              f"offset={offset_fracs[j]:.0%}  {eta_str}", flush=True)
+
+        cav_i_start, cav_i_end, neck_i_start, neck_i_end = neck_positions(
+            offset, cav_length, cav_cells_x
+        )
+        wall_res = build_resonator_mask(
+            N_x, N_y_full,
+            duct_j_start, duct_j_end,
+            cav_i_start, cav_i_end,
+            cav_cells_y_max, cav_cells_y,
+            neck_i_start, neck_i_end,
+            neck_cells_y
+        )
+        rec_res = run_simulation(
+            N_x, N_y_full, N_steps, dt, dx, rho, c,
+            decay_x, decay_y,
+            src_i, src_j, rec_i, rec_j,
+            wall_res, pulse_width, pulse_delay
+        )
+
+        _, db_res = signal_to_db(rec_res, dt)
+        TL        = (db_plain - db_res).copy()
+        TL[~freq_mask_10k] = 0.0
+
+        peak_idx, _ = find_peaks(
+            TL[freq_mask_10k],
+            height=min_peak_db,
+            distance=min_dist_bins
+        )
+        peak_freqs = fdtd_freqs_axis[freq_mask_10k][peak_idx]
+        peak_dbs   = TL[freq_mask_10k][peak_idx]
+
+        if len(peak_freqs) > 0:
+            order      = np.argsort(peak_freqs)
+            peak_freqs = peak_freqs[order]
+            peak_dbs   = peak_dbs[order]
+
+        n = min(len(peak_freqs), max_modes)
+        fdtd_freqs[i, j, :n] = peak_freqs[:n]
+        fdtd_dbs  [i, j, :n] = peak_dbs[:n]
+
+total_time = time.time() - sweep_start
+print(f"\nSweep complete — {total_runs} runs in {total_time/60:.1f} min")
+
+np.save("fdtd_freqs.npy",        fdtd_freqs)
+np.save("fdtd_dbs.npy",          fdtd_dbs)
+np.save("fdtd_offset_fracs.npy", offset_fracs_all)
+np.save("fdtd_ar_list.npy",      ar_list)
+print("Results saved: fdtd_freqs.npy  fdtd_dbs.npy  fdtd_offset_fracs.npy  fdtd_ar_list.npy")
+
+n_modes_present = int(np.max(np.sum(fdtd_freqs > 0, axis=2)))
+print(f"Max modes detected in any single configuration: {n_modes_present}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# POST-PROCESSING
+# PLOTTING CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-freqs, db_plain     = pressure_to_db(rec_plain,     dt)
-_,     db_resonator = pressure_to_db(rec_resonator, dt)
+fixed_ar_idx  = int(np.abs(ar_list - FIXED_AR).argmin())
+fixed_off_idx = int(round(FIXED_OFFSET * (num_offsets - 1)))
 
-TL        = db_plain - db_resonator
-freq_mask = freqs <= f_max
+print(f"Fixed AR for offset sweeps  : {ar_list[fixed_ar_idx]:.2f}")
+print(f"Fixed offset for AR sweeps  : {FIXED_OFFSET:.0%}  (index {fixed_off_idx})")
 
-print(f"\nFrequency resolution: {freqs[1]-freqs[0]:.2f} Hz/bin")
-print(f"TL range 0–10kHz:     {TL[freq_mask].min():.1f} to {TL[freq_mask].max():.1f} dB")
+mode_colours = plt.get_cmap('tab10')
+extent_2d    = [ar_start, ar_stop, 0.0, 1.0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PLOT
+# PLOT FUNCTIONS  —  identical layout to TMM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+def make_sq1_presence_page(m):
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        f"FDTD  SQ1 — Mode {m+1} Presence\n"
+        f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}"
+        f"  |  Sweep: {SWEEP_MODE}",
+        fontsize=11, fontweight='bold'
+    )
+    presence_vs_ar = (fdtd_freqs[:, fixed_off_idx, m] > 0).astype(float)
+    axes[0].step(ar_list, presence_vs_ar, where='mid', color=mode_colours(m), lw=2)
+    axes[0].set_xlabel("Aspect Ratio  L/W")
+    axes[0].set_ylabel("Mode present  (1=yes, 0=no)")
+    axes[0].set_title(f"A — vs AR  (offset fixed={FIXED_OFFSET:.0%})")
+    axes[0].set_ylim(-0.1, 1.3)
+    axes[0].grid(True, alpha=0.3)
 
-axes[0].plot(freqs[freq_mask], db_plain[freq_mask],
-             label="Plain duct", color='steelblue', lw=1.5)
-axes[0].plot(freqs[freq_mask], db_resonator[freq_mask],
-             label="With resonator", color='tomato', lw=1.5, alpha=0.85)
-axes[0].set_xlabel("Frequency (Hz)")
-axes[0].set_ylabel("Pressure level (dB)")
-axes[0].set_xlim(0, 10000)
-axes[0].set_title("Raw spectra")
-axes[0].legend()
-axes[0].grid(True, alpha=0.3)
+    presence_vs_offset = (fdtd_freqs[fixed_ar_idx, :, m] > 0).astype(float)
+    axes[1].step(offset_fracs_all[fixed_ar_idx, :], presence_vs_offset,
+                 where='mid', color=mode_colours(m), lw=2)
+    axes[1].set_xlabel("Offset Fraction  (0=centre, 1=wall)")
+    axes[1].set_ylabel("Mode present  (1=yes, 0=no)")
+    axes[1].set_title(f"B — vs offset  (AR fixed={ar_list[fixed_ar_idx]:.2f})")
+    axes[1].set_ylim(-0.1, 1.3)
+    axes[1].grid(True, alpha=0.3)
 
-axes[1].plot(freqs[freq_mask], TL[freq_mask], color='darkgreen', lw=1.5)
-axes[1].axhline(0, color='gray', linestyle='--', lw=0.8)
-axes[1].set_xlabel("Frequency (Hz)")
-axes[1].set_ylabel("Transmission Loss (dB)")
-axes[1].set_xlim(0, 10000)
-axes[1].set_ylim(0, 80)
-axes[1].set_title(
-    f"Transmission Loss — AR={AR:.1f}, offset={offset_frac:.0%}"
-    f"  |  Cavity {cav_length*1000:.1f}mm × {cav_width*1000:.1f}mm"
-    f"  |  Neck {neck_width_2D*1000:.1f}mm"
-)
-axes[1].grid(True, alpha=0.3)
+    presence_grid = (fdtd_freqs[:, :, m] > 0).astype(float)
+    im = axes[2].imshow(
+        presence_grid.T, origin='lower', aspect='auto',
+        extent=extent_2d, cmap='RdYlGn', interpolation='nearest', vmin=0, vmax=1
+    )
+    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04,
+                 ticks=[0, 1]).set_ticklabels(['absent', 'present'])
+    axes[2].set_xlabel("Aspect Ratio  L/W")
+    axes[2].set_ylabel("Offset Fraction")
+    axes[2].set_title("C — 2D presence map")
+    plt.tight_layout()
+    return fig
 
-plt.tight_layout()
-plt.show()
+
+def make_sq2_frequency_page(m):
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        f"FDTD  SQ2 — Mode {m+1} Frequency\n"
+        f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}"
+        f"  |  Sweep: {SWEEP_MODE}",
+        fontsize=11, fontweight='bold'
+    )
+    freq_vs_ar = np.where(fdtd_freqs[:, fixed_off_idx, m] > 0,
+                          fdtd_freqs[:, fixed_off_idx, m], np.nan)
+    axes[0].plot(ar_list, freq_vs_ar, color=mode_colours(m), lw=2, marker='o', markersize=4)
+    axes[0].set_xlabel("Aspect Ratio  L/W")
+    axes[0].set_ylabel("Frequency (Hz)")
+    axes[0].set_title(f"A — vs AR  (offset fixed={FIXED_OFFSET:.0%})")
+    axes[0].grid(True, alpha=0.3)
+
+    freq_vs_off = np.where(fdtd_freqs[fixed_ar_idx, :, m] > 0,
+                           fdtd_freqs[fixed_ar_idx, :, m], np.nan)
+    axes[1].plot(offset_fracs_all[fixed_ar_idx, :], freq_vs_off,
+                 color=mode_colours(m), lw=2, marker='o', markersize=4)
+    axes[1].set_xlabel("Offset Fraction  (0=centre, 1=wall)")
+    axes[1].set_ylabel("Frequency (Hz)")
+    axes[1].set_title(f"B — vs offset  (AR fixed={ar_list[fixed_ar_idx]:.2f})")
+    axes[1].grid(True, alpha=0.3)
+
+    freq_grid = fdtd_freqs[:, :, m].copy()
+    freq_grid[freq_grid == 0] = np.nan
+    vmin = np.nanpercentile(freq_grid, 2)  if not np.all(np.isnan(freq_grid)) else 0
+    vmax = np.nanpercentile(freq_grid, 98) if not np.all(np.isnan(freq_grid)) else 1
+    im = axes[2].imshow(
+        freq_grid.T, origin='lower', aspect='auto', extent=extent_2d,
+        cmap='plasma', interpolation='nearest', vmin=vmin, vmax=vmax
+    )
+    cb = fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    cb.set_label("Frequency (Hz)")
+    axes[2].set_xlabel("Aspect Ratio  L/W")
+    axes[2].set_ylabel("Offset Fraction")
+    axes[2].set_title("C — 2D frequency map  (white=not detected)")
+    plt.tight_layout()
+    return fig
+
+
+def make_sq3_depth_page(m):
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        f"FDTD  SQ3 — Mode {m+1} TL Depth\n"
+        f"Fixed AR={ar_list[fixed_ar_idx]:.2f}  |  Fixed offset={FIXED_OFFSET:.0%}"
+        f"  |  Sweep: {SWEEP_MODE}",
+        fontsize=11, fontweight='bold'
+    )
+    db_vs_ar = np.where(fdtd_dbs[:, fixed_off_idx, m] > 0,
+                        fdtd_dbs[:, fixed_off_idx, m], np.nan)
+    axes[0].plot(ar_list, db_vs_ar, color=mode_colours(m), lw=2, marker='o', markersize=4)
+    axes[0].set_xlabel("Aspect Ratio  L/W")
+    axes[0].set_ylabel("TL Depth (dB)")
+    axes[0].set_title(f"A — vs AR  (offset fixed={FIXED_OFFSET:.0%})")
+    axes[0].grid(True, alpha=0.3)
+
+    db_vs_off = np.where(fdtd_dbs[fixed_ar_idx, :, m] > 0,
+                         fdtd_dbs[fixed_ar_idx, :, m], np.nan)
+    axes[1].plot(offset_fracs_all[fixed_ar_idx, :], db_vs_off,
+                 color=mode_colours(m), lw=2, marker='o', markersize=4)
+    axes[1].set_xlabel("Offset Fraction  (0=centre, 1=wall)")
+    axes[1].set_ylabel("TL Depth (dB)")
+    axes[1].set_title(f"B — vs offset  (AR fixed={ar_list[fixed_ar_idx]:.2f})")
+    axes[1].grid(True, alpha=0.3)
+
+    db_grid = fdtd_dbs[:, :, m].copy()
+    db_grid[db_grid == 0] = np.nan
+    vmin = np.nanpercentile(db_grid, 2)  if not np.all(np.isnan(db_grid)) else 0
+    vmax = np.nanpercentile(db_grid, 98) if not np.all(np.isnan(db_grid)) else 1
+    im = axes[2].imshow(
+        db_grid.T, origin='lower', aspect='auto', extent=extent_2d,
+        cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax
+    )
+    cb = fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    cb.set_label("TL Depth (dB)")
+    axes[2].set_xlabel("Aspect Ratio  L/W")
+    axes[2].set_ylabel("Offset Fraction")
+    axes[2].set_title("C — 2D TL depth map  (white=not detected)")
+    plt.tight_layout()
+    return fig
+
+
+def make_tl_overlay_page(which_ars=None):
+    """
+    Raw FDTD TL spectra overlaid for all offsets — 3 ARs per page.
+    Re-runs FDTD for the selected ARs. Called per-batch during PDF generation
+    so all ARs appear, mirroring the TMM make_ar_plots batching.
+    """
+    if which_ars is None:
+        which_ars = list(range(num_ars))
+
+    n   = len(which_ars)
+    fig, axes = plt.subplots(n, 1, figsize=(14, 7 * n), squeeze=False)
+    offset_cmap = plt.get_cmap('cool')
+    offset_norm = Normalize(vmin=0, vmax=1)
+
+    for row, i in enumerate(which_ars):
+        ax  = axes[row, 0]
+        ar  = ar_list[i]
+        cav_width_plot, cav_length, cav_cells_x, cav_cells_y, max_offset = geometry_for_ar(ar)
+        offsets_plot = np.linspace(0.0, max_offset, num_offsets)
+
+        for j, offset in enumerate(offsets_plot):
+            frac   = j / (num_offsets - 1) if num_offsets > 1 else 0.0
+            colour = offset_cmap(frac)
+            cav_i_start, cav_i_end, neck_i_start, neck_i_end = neck_positions(
+                offset, cav_length, cav_cells_x
+            )
+            wall_res = build_resonator_mask(
+                N_x, N_y_full,
+                duct_j_start, duct_j_end,
+                cav_i_start, cav_i_end,
+                cav_cells_y_max, cav_cells_y,
+                neck_i_start, neck_i_end,
+                neck_cells_y
+            )
+            rec_res = run_simulation(
+                N_x, N_y_full, N_steps, dt, dx, rho, c,
+                decay_x, decay_y,
+                src_i, src_j, rec_i, rec_j,
+                wall_res, pulse_width, pulse_delay
+            )
+            _, db_res = signal_to_db(rec_res, dt)
+            TL = (db_plain - db_res)[freq_mask_10k]
+            ax.plot(fdtd_freqs_axis[freq_mask_10k], TL,
+                    color=colour, linewidth=0.7, alpha=0.75)
+
+        sm = ScalarMappable(cmap=offset_cmap, norm=offset_norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.018, pad=0.02)
+        cbar.set_label("Neck offset\n(0=centre, 1=wall)", fontsize=8)
+
+        ax.set_title(
+            f"FDTD  AR={ar:.2f}  |  L={cav_length*1000:.1f}mm  |  "
+            f"W={cav_width_plot*1000:.1f}mm  |  max offset={max_offset*1000:.1f}mm",
+            fontweight='bold', loc='left', fontsize=9
+        )
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("Transmission Loss (dB)")
+        ax.set_xlim(0, f_max)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, alpha=0.2, linestyle='--')
+
+    plt.subplots_adjust(hspace=0.45, left=0.07, right=0.92, top=0.97, bottom=0.03)
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PDF GENERATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+pdf_path = f"Helmholtz_FDTD_{SWEEP_MODE.capitalize()}_Report.pdf"
+per_page = 3
+print(f"\nGenerating PDF: {pdf_path}")
+
+with PdfPages(pdf_path) as pdf:
+
+    print("  SQ1 — mode presence")
+    for m in range(n_modes_present):
+        fig = make_sq1_presence_page(m)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+        print(f"    Mode {m+1}")
+
+    print("  SQ2 — mode frequency")
+    for m in range(n_modes_present):
+        fig = make_sq2_frequency_page(m)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+        print(f"    Mode {m+1}")
+
+    print("  SQ3 — mode TL depth")
+    for m in range(n_modes_present):
+        fig = make_sq3_depth_page(m)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+        print(f"    Mode {m+1}")
+
+    print("  Raw TL overlays — all ARs (re-running FDTD per batch)")
+    for batch_start in range(0, num_ars, per_page):
+        batch = list(range(batch_start, min(batch_start + per_page, num_ars)))
+        fig   = make_tl_overlay_page(which_ars=batch)
+        pdf.savefig(fig, bbox_inches='tight', dpi=150)
+        plt.close(fig)
+        print(f"    AR {ar_list[batch[0]]:.2f}-{ar_list[batch[-1]]:.2f}")
+
+    info = pdf.infodict()
+    info['Title']   = f'Helmholtz Resonator FDTD Parametric Sweep ({SWEEP_MODE})'
+    info['Author']  = 'Svar Joshi'
+    info['Subject'] = 'Asymmetric rectangular cavity — neck offset x aspect ratio — 2D FDTD'
+
+print(f"\nSaved: {pdf_path}")
+
+if platform.system() == 'Darwin':
+    subprocess.call(('open', pdf_path))
+elif platform.system() == 'Windows':
+    os.startfile(pdf_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERACTIVE MODE  —  identical commands to TMM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print("\n" + "-" * 52)
+print("INTERACTIVE MODE")
+print("-" * 52)
+print("  sq1 [mode]   — mode presence plots    e.g. sq1 2")
+print("  sq2 [mode]   — mode frequency plots")
+print("  sq3 [mode]   — mode TL depth plots")
+print("  [number]     — raw TL overlay for AR  e.g. 3.5")
+print("  exit         — quit")
+print("-" * 52)
+print(f"  ({n_modes_present} modes detected across sweep)")
+print("-" * 52)
+
+while True:
+    cmd = input("\n> ").strip().lower()
+
+    if cmd == 'exit':
+        break
+
+    elif cmd.startswith('sq1'):
+        try:
+            m = int(cmd.split()[1]) - 1
+            if not (0 <= m < n_modes_present):
+                print(f"  Mode out of range — enter 1 to {n_modes_present}")
+                continue
+            fig = make_sq1_presence_page(m)
+            plt.show()
+        except (IndexError, ValueError):
+            print(f"  Usage: sq1 [1-{n_modes_present}]")
+
+    elif cmd.startswith('sq2'):
+        try:
+            m = int(cmd.split()[1]) - 1
+            if not (0 <= m < n_modes_present):
+                print(f"  Mode out of range — enter 1 to {n_modes_present}")
+                continue
+            fig = make_sq2_frequency_page(m)
+            plt.show()
+        except (IndexError, ValueError):
+            print(f"  Usage: sq2 [1-{n_modes_present}]")
+
+    elif cmd.startswith('sq3'):
+        try:
+            m = int(cmd.split()[1]) - 1
+            if not (0 <= m < n_modes_present):
+                print(f"  Mode out of range — enter 1 to {n_modes_present}")
+                continue
+            fig = make_sq3_depth_page(m)
+            plt.show()
+        except (IndexError, ValueError):
+            print(f"  Usage: sq3 [1-{n_modes_present}]")
+
+    else:
+        try:
+            target_ar = float(cmd)
+            closest   = int(np.abs(ar_list - target_ar).argmin())
+            print(f"Plotting AR={ar_list[closest]:.2f}  (re-running {num_offsets} FDTD sims...)")
+            fig = make_tl_overlay_page(which_ars=[closest])
+            plt.show()
+        except ValueError:
+            print("Unrecognised — try 'sq1 2', '3.5', or 'exit'.")
